@@ -76,7 +76,6 @@ h1 span{display:block;color:var(--muted);font-size:.44em;letter-spacing:.22em;
 .dot{width:7px;height:7px;border-radius:50%;background:var(--led);flex:none}
 .dot.lock{background:#3ADB7E}
 .dot.hold{background:var(--yl)}
-.dot.world{background:var(--vi)}
 .grow{flex:1}
 .bottombar{position:absolute;left:0;right:0;bottom:0;
   padding:14px 12px max(14px,env(safe-area-inset-bottom));
@@ -153,7 +152,7 @@ h1 span{display:block;color:var(--muted);font-size:.44em;letter-spacing:.22em;
     <p class="err" id="homeErr" hidden></p>
   </div>
 
-  <p class="foot">Tracking locks onto the sticker's colours — cyan body, yellow <code>90'S</code>. Everything else is drawn in proportion to it. Once it has the sticker it hands over to the scene itself, gripping the texture of the box around it, so the guide stays welded to the panel even when the sticker is covered, off-frame or too small to read.</p>
+  <p class="foot">Tracking locks onto the sticker's colours — cyan body, yellow <code>90'S</code>. Everything else is drawn in proportion to it. Look away and the guide stays put rather than vanishing — it rides along with your phone's tilt if it can, and simply holds its place if it can't.</p>
 </section>
 
 <section id="scan">
@@ -197,9 +196,6 @@ h1 span{display:block;color:var(--muted);font-size:.44em;letter-spacing:.22em;
       <label>Rotation <span id="vRot">0°</span><input type="range" id="sRot" min="-18" max="18" step="0.5" value="0"></label>
       <label>Shift across <span id="vU">0.0</span><input type="range" id="sU" min="-4" max="4" step="0.1" value="0"></label>
       <label>Shift up/down <span id="vV">0.0</span><input type="range" id="sV" min="-4" max="4" step="0.1" value="0"></label>
-      <div class="rule"></div>
-      <button class="btn" id="wtBtn">World tracking: on</button>
-      <button class="btn" id="wtDotsBtn">Show tracking points: off</button>
       <button class="btn" id="tuneReset">Reset to default</button>
     </div>
   </div>
@@ -322,14 +318,12 @@ const BYID = Object.fromEntries(HOT.map(h=>[h.id,h]));
    ============================================================ */
 const DW = 384;
 let det = document.createElement('canvas'), dctx = det.getContext('2d',{willReadFrequently:true});
-let cls = null, cellN = null, cellId = null, stack = null, gray = null;
+let cls = null, cellN = null, cellId = null, stack = null;
 
 function classify(d, n){
   if(!cls || cls.length !== n) cls = new Uint8Array(n);
-  if(!gray || gray.length !== n) gray = new Uint8Array(n);
   for(let i=0,p=0;i<n;i++,p+=4){
     const r=d[p], g=d[p+1], b=d[p+2];
-    gray[i] = (r*77 + g*150 + b*29) >> 8;
     const mx = r>g?(r>b?r:b):(g>b?g:b);
     if(mx < 64){ cls[i]=0; continue; }
     const mn = r<g?(r<b?r:b):(g<b?g:b);
@@ -358,7 +352,6 @@ function detect(src, sw, sh){
   const img = dctx.getImageData(0,0,DW,dh);
   const n = DW*dh;
   classify(img.data, n);
-  WT.gw = DW; WT.gh = dh; WT.ready = true;
 
   // coarse 4x4 cell grid -> merges the sticker's separate colour patches
   const cw = DW>>2, ch = dh>>2, nc = cw*ch;
@@ -426,239 +419,6 @@ function detect(src, sw, sh){
   const d = Math.hypot(ycx-cx, ycy-cy)/sigma;
   if(d < 0.35 || d > 1.7) return null;
   return {cx, cy, sigma, theta: Math.atan2(ycy-cy, ycx-cx), w:DW, h:dh, quality: Math.min(1, N/400)};
-}
-
-/* ============================================================
-   World tracking
-   Once the sticker has been found the overlay stops depending on it.
-   A scatter of small high-contrast patches is lifted from the live
-   frame around the panel and re-found every frame; the best-fit
-   move / scale / turn between where they were and where they are now
-   is applied to the anchor. The sticker can then be covered by a
-   hand, leave the frame, or shrink below the colour classifier's
-   reach, and the guide stays welded to the box. Seeing the sticker
-   again snaps the anchor back and re-lays the patches, clearing any
-   drift the scene tracker has accumulated.
-   ============================================================ */
-const WT = {on:true, dots:false, ready:false, active:false,
-            pts:[], gw:0, gh:0, inliers:0, seeded:0, last:null};
-const WP = 4;                       // patch half-width -> 9x9
-const WPN = (WP*2+1)*(WP*2+1);
-const WSR = 12;                     // per-frame search radius, detector px
-const WMIN = 7, WMAX = 26;
-const WERR = 22;                    // max mean abs difference for a match
-
-let integ = null;
-
-function buildInteg(){
-  const gw=WT.gw, gh=WT.gh, W=gw+1, n=W*(gh+1);
-  if(!integ || integ.length !== n) integ = new Int32Array(n);
-  for(let y=0;y<gh;y++){
-    let rs=0; const gr=y*gw, ir=(y+1)*W, pr=y*W;
-    for(let x=0;x<gw;x++){ rs += gray[gr+x]; integ[ir+x+1] = integ[pr+x+1] + rs; }
-  }
-}
-function pMean(px,py){
-  const W=WT.gw+1, x0=px-WP, y0=py-WP, x1=px+WP+1, y1=py+WP+1;
-  return (integ[y1*W+x1] - integ[y0*W+x1] - integ[y1*W+x0] + integ[y0*W+x0]) / WPN;
-}
-function inFrame(px,py){
-  const p = WP+1;
-  return px>=p && py>=p && px < WT.gw-p && py < WT.gh-p;
-}
-function grab(px,py){
-  const gw=WT.gw, t=new Uint8Array(WPN); let k=0;
-  for(let j=-WP;j<=WP;j++){ const row=(py+j)*gw+px;
-    for(let i=-WP;i<=WP;i++) t[k++]=gray[row+i]; }
-  return t;
-}
-// corner-ness: texture in both directions, so a point on a plain
-// edge (which can slide along it) never gets picked
-function corner(px,py){
-  const gw=WT.gw; let gx=0, gy=0;
-  for(let j=-WP+1;j<=WP-1;j+=2){ const row=(py+j)*gw+px;
-    for(let i=-WP+1;i<=WP-1;i+=2){
-      gx += Math.abs(gray[row+i+1]-gray[row+i-1]);
-      gy += Math.abs(gray[row+i+gw]-gray[row+i-gw]);
-    } }
-  return Math.min(gx,gy);
-}
-// mean-corrected SAD, so a patch survives the auto-exposure shifting
-function sad(px,py,t,tm,cap){
-  const gw=WT.gw, d=pMean(px,py)-tm;
-  let sum=0, k=0;
-  for(let j=-WP;j<=WP;j++){ const row=(py+j)*gw+px;
-    for(let i=-WP;i<=WP;i++) sum += Math.abs(gray[row+i]-d-t[k++]);
-    if(sum > cap) return sum;
-  }
-  return sum;
-}
-function findPoint(p, cx, cy){
-  let bx=0, by=0, best=Infinity;
-  for(let dy=-WSR;dy<=WSR;dy+=3) for(let dx=-WSR;dx<=WSR;dx+=3){
-    const px=cx+dx, py=cy+dy;
-    if(!inFrame(px,py)) continue;
-    const e = sad(px,py,p.t,p.m,best);
-    if(e<best){ best=e; bx=px; by=py; }
-  }
-  if(best===Infinity) return null;
-  const sx0=bx, sy0=by;
-  for(let dy=-2;dy<=2;dy++) for(let dx=-2;dx<=2;dx++){
-    const px=sx0+dx, py=sy0+dy;
-    if((!dx&&!dy) || !inFrame(px,py)) continue;
-    const e = sad(px,py,p.t,p.m,best);
-    if(e<best){ best=e; bx=px; by=py; }
-  }
-  if(!inFrame(bx-1,by-1) || !inFrame(bx+1,by+1)) return null;
-
-  const e0 = sad(bx,by,p.t,p.m,Infinity);
-  if(e0/WPN > WERR) return null;
-  // a patch that has gone flat (a hand, a blown highlight) will still
-  // find some shallow minimum — refuse it unless the texture it was
-  // picked for is still there
-  if(corner(bx,by) < p.c0*0.30) return null;
-
-  // parabola through the three SAD values on each axis: whole-pixel
-  // matching alone biases every estimate the same way, and that bias
-  // compounds into scale drift over a long hold
-  const xm=sad(bx-1,by,p.t,p.m,Infinity), xp=sad(bx+1,by,p.t,p.m,Infinity);
-  const ym=sad(bx,by-1,p.t,p.m,Infinity), yp=sad(bx,by+1,p.t,p.m,Infinity);
-  let sx=0, sy=0, dn;
-  dn = xm - 2*e0 + xp; if(dn > 1) sx = Math.max(-0.5, Math.min(0.5, 0.5*(xm-xp)/dn));
-  dn = ym - 2*e0 + yp; if(dn > 1) sy = Math.max(-0.5, Math.min(0.5, 0.5*(ym-yp)/dn));
-
-  return {x: bx+sx, y: by+sy, e: e0/WPN,
-          edge: Math.abs(bx-cx) >= WSR || Math.abs(by-cy) >= WSR};
-}
-// least-squares similarity (translate + uniform scale + rotate)
-function fitSim(pts){
-  const n=pts.length;
-  let mx=0,my=0,nx=0,ny=0;
-  for(const p of pts){ mx+=p.x; my+=p.y; nx+=p.nx; ny+=p.ny; }
-  mx/=n; my/=n; nx/=n; ny/=n;
-  let a=0,b=0,den=0;
-  for(const p of pts){
-    const px=p.x-mx, py=p.y-my, qx=p.nx-nx, qy=p.ny-ny;
-    a += px*qx + py*qy;
-    b += px*qy - py*qx;
-    den += px*px + py*py;
-  }
-  if(den < 1) return null;
-  a/=den; b/=den;
-  return {a, b, tx: nx-(a*mx-b*my), ty: ny-(b*mx+a*my)};
-}
-const applySim = (T,x,y) => [T.a*x - T.b*y + T.tx, T.b*x + T.a*y + T.ty];
-
-// add === true tops the existing set up rather than replacing it, which
-// is how the tracker survives a hand moving across the panel: the
-// patches it loses are replaced from whatever is still visible
-function seedWorld(add){
-  if(!add){ WT.pts = []; WT.last = null; }
-  if(!WT.ready || !pose.has || !pose.s) return;
-  buildInteg();
-  const B = basis(), S = pose.s;
-  let x0=1e9, y0=1e9, x1=-1e9, y1=-1e9;
-  for(const q of PANEL){
-    const x = pose.x + S*(q[0]*B.e1x + q[1]*B.e2x);
-    const y = pose.y + S*(q[0]*B.e1y + q[1]*B.e2y);
-    if(x<x0)x0=x; if(x>x1)x1=x; if(y<y0)y0=y; if(y>y1)y1=y;
-  }
-  // grow the box: the surrounding casework holds still with the panel
-  // and gives the tracker something to bite on when the panel itself
-  // is flat black
-  const gx=(x1-x0)*0.15, gy=Math.max((y1-y0)*0.7, 18);
-  x0=Math.max(WP+2, x0-gx); x1=Math.min(WT.gw-WP-3, x1+gx);
-  y0=Math.max(WP+2, y0-gy); y1=Math.min(WT.gh-WP-3, y1+gy);
-  if(x1-x0 < 26 || y1-y0 < 18) return;
-
-  const step = Math.max(5, Math.round(Math.min(x1-x0, y1-y0)/13));
-  const cand = [];
-  for(let y=y0|0; y<=y1; y+=step) for(let x=x0|0; x<=x1; x+=step){
-    const c = corner(x,y);
-    if(c > 80) cand.push({x,y,c});
-  }
-  if(!cand.length) return;
-  cand.sort((a,b)=>b.c-a.c);
-  const sep = Math.max(9, step+2), sep2 = sep*sep;
-  for(const c of cand){
-    if(WT.pts.length >= WMAX) break;
-    let ok = true;
-    for(const p of WT.pts){
-      const dx=p.x-c.x, dy=p.y-c.y;
-      if(dx*dx+dy*dy < sep2){ ok=false; break; }
-    }
-    if(ok) WT.pts.push({x:c.x, y:c.y, fx:0, fy:0, c0:c.c,
-                        t:grab(c.x,c.y), m:pMean(c.x,c.y), miss:0, age:0});
-  }
-}
-
-function trackWorld(apply){
-  WT.inliers = 0;
-  if(!WT.ready || WT.pts.length < 5) return false;
-  buildInteg();
-  const L = WT.last, good = [];
-  let edged = 0;
-  for(let i=WT.pts.length-1; i>=0; i--){
-    const p = WT.pts[i];
-    // start the search where last frame's motion says it should be
-    let cx = p.x, cy = p.y;
-    if(L){ const q = applySim(L, p.x, p.y); cx = q[0]; cy = q[1]; }
-    // the template is cut on the integer grid; the feature sits at a
-    // fixed fractional offset inside it
-    const hit = findPoint(p, Math.round(cx-p.fx), Math.round(cy-p.fy));
-    if(hit){
-      p.miss = 0;
-      p.nx = hit.x + p.fx; p.ny = hit.y + p.fy;
-      if(hit.edge) edged++;
-      good.push(p);
-    }
-    else if(++p.miss > 2) WT.pts.splice(i,1);
-  }
-  if(good.length < 6){ WT.last = null; return false; }
-  // most matches pinned against the edge of their search window means
-  // the real motion was bigger than the window: whatever agreement the
-  // patches reached is an artefact, not a measurement
-  if(edged > good.length*0.4){ WT.last = null; return false; }
-
-  let T = fitSim(good);
-  if(!T){ WT.last = null; return false; }
-  const res = good.map(p=>{
-    const q = applySim(T, p.x, p.y);
-    return Math.hypot(q[0]-p.nx, q[1]-p.ny);
-  });
-  const med = res.slice().sort((a,b)=>a-b)[res.length>>1];
-  const lim = Math.max(1.8, med*2.5);
-  const inl = good.filter((p,i)=> res[i] <= lim);
-  if(inl.length >= 6){ const T2 = fitSim(inl); if(T2) T = T2; }
-  WT.inliers = inl.length;
-  if(inl.length < 6 || med > 2.5){ WT.last = null; return false; }
-
-  const sc = Math.hypot(T.a, T.b), ang = Math.atan2(T.b, T.a);
-  if(!(sc > 0.86 && sc < 1.16) || Math.abs(ang) > 0.35){ WT.last = null; return false; }
-
-  for(const p of good){
-    p.x = p.nx; p.y = p.ny;
-    // re-cut the template now and then so it keeps up with the patch
-    // growing, shrinking and turning as the phone moves, keeping the
-    // sub-pixel offset so the re-cut costs no accuracy
-    if(++p.age % 10 === 0){
-      const ix = Math.round(p.x), iy = Math.round(p.y);
-      if(inFrame(ix,iy)){
-        p.t = grab(ix,iy); p.m = pMean(ix,iy);
-        p.fx = p.x - ix; p.fy = p.y - iy;
-      }
-    }
-  }
-  WT.last = T;
-
-  if(apply){
-    const q = applySim(T, pose.x, pose.y);
-    pose.x = q[0]; pose.y = q[1];
-    pose.s *= sc;
-    const c=pose.cos, s=pose.sin, ca=Math.cos(ang), sa=Math.sin(ang);
-    pose.cos = c*ca - s*sa; pose.sin = s*ca + c*sa;
-  }
-  return true;
 }
 
 /* ============================================================
@@ -828,39 +588,23 @@ function draw(){
   const Cx = ox + (pose.x+pose.hx)*k, Cy = oy + (pose.y+pose.hy)*k;
   const P = (u,v)=>[Cx + S*((u+tune.u)*B.e1x + (v+tune.v)*B.e2x),
                     Cy + S*((u+tune.u)*B.e1y + (v+tune.v)*B.e2y)];
-  const world = !pose.locked && WT.active;
-  const heldFade = pose.locked ? 1 : (world ? 0.95 : 0.82);
+  const heldFade = pose.locked ? 1 : 0.82;
   octx.globalAlpha = heldFade;
   octx.lineJoin = 'round';
 
   // panel outline
-  octx.setLineDash(pose.locked || world ? [7,7] : [3,6]);
-  octx.lineWidth = 1.2;
-  octx.strokeStyle = pose.locked || world ? 'rgba(236,233,227,.34)' : 'rgba(236,233,227,.22)';
+  octx.setLineDash(pose.locked ? [7,7] : [3,6]);
+  octx.lineWidth = 1.2; octx.strokeStyle = pose.locked ? 'rgba(236,233,227,.34)' : 'rgba(236,233,227,.22)';
   octx.beginPath();
   PANEL.forEach((p,i)=>{ const q=P(p[0],p[1]); i?octx.lineTo(q[0],q[1]):octx.moveTo(q[0],q[1]); });
   octx.closePath(); octx.stroke(); octx.setLineDash([]);
 
-  // anchor ring — cyan on the sticker, violet when the scene is
-  // carrying it, dashed amber when nothing is holding it at all
+  // marker anchor ring — solid + bright while locked, dashed + amber while held
   octx.lineWidth = 1.8;
-  octx.strokeStyle = pose.locked ? 'rgba(47,191,222,.9)'
-                   : world ? 'rgba(138,107,234,.9)' : 'rgba(232,194,0,.8)';
-  octx.setLineDash(pose.locked || world ? [] : [4,5]);
+  octx.strokeStyle = pose.locked ? 'rgba(47,191,222,.9)' : 'rgba(232,194,0,.8)';
+  octx.setLineDash(pose.locked ? [] : [4,5]);
   octx.beginPath(); octx.arc(Cx, Cy, S*1.25, 0, Math.PI*2); octx.stroke();
   octx.setLineDash([]);
-
-  // scene patches, for checking what the tracker is actually holding
-  if(WT.dots && WT.pts.length){
-    octx.globalAlpha = 1;
-    for(const p of WT.pts){
-      octx.fillStyle = p.miss ? 'rgba(232,194,0,.75)' : 'rgba(138,107,234,.8)';
-      octx.beginPath();
-      octx.arc(ox + p.x*k, oy + p.y*k, 2.2, 0, Math.PI*2);
-      octx.fill();
-    }
-    octx.globalAlpha = heldFade;
-  }
 
   const fs = Math.max(11, Math.min(16.5, S*0.46));
   octx.font = `600 ${fs}px 'Barlow Semi Condensed', system-ui, sans-serif`;
@@ -906,7 +650,7 @@ function draw(){
    Loop + sources
    ============================================================ */
 const dot = document.getElementById('dot'), stateEl = document.getElementById('state');
-function setState(txt, mode){ stateEl.textContent = txt; dot.classList.remove('lock','hold','world'); if(mode) dot.classList.add(mode); }
+function setState(txt, mode){ stateEl.textContent = txt; dot.classList.remove('lock','hold'); if(mode) dot.classList.add(mode); }
 
 let lastRun = 0;
 function loop(now){
@@ -919,34 +663,15 @@ function loop(now){
   const sh = srcMode==='cam' ? vid.videoHeight : still.naturalHeight;
   if(!sw || !sh){ return; }
   const m = detect(src, sw, sh);
-  WT.active = false;
-
   if(m){
     update(m, now);
-    if(WT.on){
-      // keep the scene patches fresh while the sticker is in charge,
-      // so the handover costs nothing when it disappears
-      if(WT.pts.length < WMIN || now - WT.seeded > 1200){ seedWorld(); WT.seeded = now; }
-      else trackWorld(false);
-    }
   }else if(pose.has){
-    if(WT.on && trackWorld(true)){
-      WT.active = true;
-      pose.locked = false;
-      pose.hx = 0; pose.hy = 0; pose.hrot = 0;
-      if(gyroNow) gyroBase = {a:gyroNow.a, b:gyroNow.b, g:gyroNow.g};
-      if(WT.pts.length < 14) seedWorld(true);
-    }else{
-      holdDrift();
-    }
+    holdDrift();
   }
-
   if(!pose.has){
     setState('Looking for the sticker', null);
   }else if(pose.locked){
     setState(pose.s < 5 ? 'Locked — move a little closer' : 'Locked on the sticker', 'lock');
-  }else if(WT.active){
-    setState('Tracking the box — sticker out of view', 'world');
   }else{
     setState(motionEnabled ? 'Holding — following your tilt' : 'Holding last position — realign to relock', 'hold');
   }
@@ -976,7 +701,6 @@ function openScan(){
   document.getElementById('manual').classList.remove('on');
   document.getElementById('scan').classList.add('on');
   frozen=false; document.getElementById('freeze').textContent='Freeze';
-  WT.pts=[]; WT.last=null; WT.active=false; WT.seeded=0; WT.ready=false;
   cancelAnimationFrame(raf); raf = requestAnimationFrame(loop);
 }
 function closeScan(){
@@ -1042,26 +766,8 @@ for(const [key,[sid,vid_,fmt]] of Object.entries(S)){
   el.value = tune[key]; out.textContent = fmt(tune[key]);
   el.addEventListener('input', ()=>{ tune[key]=parseFloat(el.value); out.textContent=fmt(tune[key]); saveTune(); draw(); });
 }
-const wtBtn = document.getElementById('wtBtn'), wtDotsBtn = document.getElementById('wtDotsBtn');
-WT.on = tune.world !== false;
-WT.dots = tune.dots === true;
-function paintWT(){
-  wtBtn.textContent = 'World tracking: ' + (WT.on ? 'on' : 'off');
-  wtDotsBtn.textContent = 'Show tracking points: ' + (WT.dots ? 'on' : 'off');
-  wtDotsBtn.style.opacity = WT.on ? 1 : 0.45;
-}
-paintWT();
-wtBtn.onclick = ()=>{
-  WT.on = !WT.on; tune.world = WT.on; saveTune();
-  if(WT.on){ WT.seeded = 0; } else { WT.pts = []; WT.last = null; WT.active = false; }
-  paintWT(); draw();
-};
-wtDotsBtn.onclick = ()=>{
-  WT.dots = !WT.dots; tune.dots = WT.dots; saveTune(); paintWT(); draw();
-};
-
 document.getElementById('tuneReset').onclick = ()=>{
-  tune={scale:1,rot:0,u:0,v:0,world:WT.on,dots:WT.dots}; saveTune();
+  tune={scale:1,rot:0,u:0,v:0}; saveTune();
   for(const [key,[sid,vid_,fmt]] of Object.entries(S)){
     document.getElementById(sid).value = tune[key];
     document.getElementById(vid_).textContent = fmt(tune[key]);
