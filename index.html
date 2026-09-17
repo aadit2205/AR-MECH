@@ -113,7 +113,19 @@ h1 span{display:block;color:var(--muted);font-size:.44em;letter-spacing:.22em;
 .tune.on{display:flex}
 .tune label{font-family:var(--label);font-size:13px;letter-spacing:.07em;color:#C3C6C4;
   display:flex;justify-content:space-between;gap:12px}
-.tune input{width:100%;accent-color:var(--cy)}
+.tune input[type=range]{width:100%;accent-color:var(--cy)}
+textarea,input[type=password]{width:100%;background:rgba(236,233,227,.06);color:var(--ink);
+  border:1px solid var(--line);border-radius:3px;padding:11px 12px;font:inherit;font-size:15.5px;
+  resize:vertical;font-weight:300}
+.askrow{display:flex;gap:9px}
+.askrow .btn{flex:1;padding:12px}
+a.btn{display:block;text-decoration:none;font-size:15px;padding:12px}
+.askout{font-size:15.5px;line-height:1.65;font-weight:300;white-space:pre-wrap;
+  border-left:2px solid var(--cy);padding:2px 0 2px 13px;margin:2px 0}
+.askhint{font-size:13.5px;line-height:1.55;color:var(--muted);font-weight:300;margin:9px 0}
+#askKeyWrap summary{font-size:13px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);
+  cursor:pointer;padding:6px 0}
+#askKeyWrap .btn{margin-top:9px}
 
 /* ---------- manual ---------- */
 #manual{display:none;min-height:100dvh;padding:max(20px,env(safe-area-inset-top)) 22px max(40px,env(safe-area-inset-bottom))}
@@ -152,7 +164,7 @@ h1 span{display:block;color:var(--muted);font-size:.44em;letter-spacing:.22em;
     <p class="err" id="homeErr" hidden></p>
   </div>
 
-  <p class="foot">Tracking locks onto the sticker's colours — cyan body, yellow <code>90'S</code>. Everything else is drawn in proportion to it. Look away and the guide stays put rather than vanishing — it rides along with your phone's tilt if it can, and simply holds its place if it can't.</p>
+  <p class="foot">Tracking locks onto the sticker's colours — cyan body, yellow <code>90'S</code>. Everything else is drawn in proportion to it. Look away and the guide holds its last position rather than vanishing, and snaps back the moment the sticker returns.</p>
 </section>
 
 <section id="scan">
@@ -164,7 +176,7 @@ h1 span{display:block;color:var(--muted);font-size:.44em;letter-spacing:.22em;
   <div class="topbar">
     <div class="pill state"><span class="dot" id="dot"></span><span id="state">Looking for the sticker</span></div>
     <div class="grow"></div>
-    <button class="pill" id="motionBtn" hidden>Enable tilt</button>
+    <button class="pill" id="levelBtn" aria-pressed="false">Level</button>
     <button class="pill" id="exit">Close</button>
   </div>
   <div class="bottombar">
@@ -172,6 +184,7 @@ h1 span{display:block;color:var(--muted);font-size:.44em;letter-spacing:.22em;
     <div class="tools">
       <button class="pill" id="freeze">Freeze</button>
       <button class="pill" id="tuneBtn">Adjust fit</button>
+      <button class="pill" id="askBtn">Ask AI</button>
       <button class="pill" id="toDemo">Photo</button>
     </div>
   </div>
@@ -197,6 +210,23 @@ h1 span{display:block;color:var(--muted);font-size:.44em;letter-spacing:.22em;
       <label>Shift across <span id="vU">0.0</span><input type="range" id="sU" min="-4" max="4" step="0.1" value="0"></label>
       <label>Shift up/down <span id="vV">0.0</span><input type="range" id="sV" min="-4" max="4" step="0.1" value="0"></label>
       <button class="btn" id="tuneReset">Reset to default</button>
+    </div>
+
+    <div class="tune" id="ask">
+      <div class="rule"></div>
+      <textarea id="askQ" rows="3" placeholder="e.g. Room 2 is silent but its light is on — where do I start?"></textarea>
+      <div class="askrow">
+        <button class="btn" id="askSend">Ask</button>
+        <button class="btn" id="askCopy">Copy brief</button>
+      </div>
+      <a class="btn" id="askOpen" target="_blank" rel="noopener">Open in a chat instead</a>
+      <div id="askOut" class="askout" hidden></div>
+      <details id="askKeyWrap">
+        <summary class="lab">Answer in this app</summary>
+        <p class="askhint">Paste an Anthropic API key to get answers without leaving the page. It is kept on this device only and sent straight to Anthropic. Without one, use Copy brief or the chat link above.</p>
+        <input type="password" id="askKey" placeholder="sk-ant-..." autocomplete="off">
+        <button class="btn" id="askKeySave">Save key</button>
+      </details>
     </div>
   </div>
 </div>
@@ -424,29 +454,29 @@ function detect(src, sw, sh){
 /* ============================================================
    Pose smoothing + projection
    Once the marker has been seen, the overlay is never cleared —
-   losing the sticker just stops updating the anchor. If the phone's
-   orientation sensors are available, tilt/pan/roll deltas since the
-   last good lock nudge the held pose so it drifts roughly the way
-   the real panel would as you move the camera, instead of statically
-   floating. Without sensors it simply holds the last known spot.
+   losing the sticker just freezes the anchor exactly where it was.
+   It deliberately does NOT follow the phone: a single round marker
+   gives no depth, so any sensor-driven guess swims away from the
+   real panel. Holding still is wrong by a fixed amount; drifting is
+   wrong by a growing one.
    ============================================================ */
 const pose = {x:0,y:0,s:0,cos:Math.cos(REF_THETA),sin:Math.sin(REF_THETA),
-  has:false,locked:false,t:0, hx:0,hy:0,hrot:0};
+  has:false,locked:false,t:0};
 let tune = {scale:1, rot:0, u:0, v:0};
-try{ const raw = localStorage.getItem('panelscope.tune'); if(raw) tune = Object.assign(tune, JSON.parse(raw)); }catch(e){}
+let levelLock = false;
+try{
+  const raw = localStorage.getItem('panelscope.tune'); if(raw) tune = Object.assign(tune, JSON.parse(raw));
+  levelLock = localStorage.getItem('panelscope.level') === '1';
+}catch(e){}
 function saveTune(){ try{ localStorage.setItem('panelscope.tune', JSON.stringify(tune)); }catch(e){} }
-
-let gyroNow = null, gyroBase = null, motionEnabled = false;
-function angDelta(a,b){ let d=a-b; while(d>180)d-=360; while(d<-180)d+=360; return d; }
-window.addEventListener('deviceorientation', e=>{
-  if(e.alpha==null && e.beta==null && e.gamma==null) return;
-  gyroNow = {a:e.alpha||0, b:e.beta||0, g:e.gamma||0};
-  motionEnabled = true;
-}, true);
+function saveLevel(){ try{ localStorage.setItem('panelscope.level', levelLock?'1':'0'); }catch(e){} }
 
 function update(m, now){
   if(!m){ return; }
-  const a = pose.has ? 0.35 : 1, b = pose.has ? 0.22 : 1, c = pose.has ? 0.10 : 1;
+  const a = pose.has ? 0.35 : 1, b = pose.has ? 0.22 : 1;
+  // rotation is the noisiest term and its error is levered out across the
+  // whole panel, so it moves far slower than position or scale
+  const c = pose.has ? 0.05 : 1;
   pose.x += (m.cx-pose.x)*a;
   pose.y += (m.cy-pose.y)*a;
   pose.s += (m.sigma-pose.s)*b;
@@ -454,33 +484,23 @@ function update(m, now){
   pose.cos += (ct-pose.cos)*c; pose.sin += (st-pose.sin)*c;
   const L=Math.hypot(pose.cos,pose.sin)||1; pose.cos/=L; pose.sin/=L;
   pose.has = true; pose.locked = true; pose.t = now;
-  pose.hx = 0; pose.hy = 0; pose.hrot = 0;
-  if(gyroNow) gyroBase = {a:gyroNow.a, b:gyroNow.b, g:gyroNow.g};
 }
 
-function holdDrift(){
-  // marker not seen this frame but we have a last-known pose — keep it
-  // on screen, and if we can read the device's tilt, ride along with it.
-  pose.locked = false;
-  if(!gyroBase || !gyroNow || !pose.s) return;
-  const dYaw   = angDelta(gyroNow.a, gyroBase.a);
-  const dPitch = gyroNow.b - gyroBase.b;
-  const dRoll  = gyroNow.g - gyroBase.g;
-  const clampV = pose.s*9;
-  const pxPerDeg = pose.s*0.11;
-  pose.hx = Math.max(-clampV, Math.min(clampV, -dYaw*pxPerDeg));
-  pose.hy = Math.max(-clampV, Math.min(clampV, -dPitch*pxPerDeg*0.8));
-  pose.hrot = Math.max(-0.5, Math.min(0.5, -dRoll*Math.PI/180));
-}
-
+const MAX_TILT = 14 * Math.PI/180;   // hard ceiling on measured rotation
 function basis(){
-  // trust the sticker's measured rotation more as it gets bigger on screen
-  let th = Math.atan2(pose.sin, pose.cos);
-  let diff = th - REF_THETA;
-  while(diff > Math.PI) diff -= 2*Math.PI;
-  while(diff < -Math.PI) diff += 2*Math.PI;
-  const w = Math.max(0, Math.min(1, (pose.s-4)/10));
-  th = REF_THETA + diff*w + tune.rot*Math.PI/180 + pose.hrot;
+  let diff = 0;
+  if(!levelLock){
+    // the sticker's rotation is only readable when it is genuinely large on
+    // screen; far away, a couple of stray pixels swing the angle by degrees
+    // and that error multiplies out to the far end of the panel
+    let th = Math.atan2(pose.sin, pose.cos);
+    diff = th - REF_THETA;
+    while(diff > Math.PI) diff -= 2*Math.PI;
+    while(diff < -Math.PI) diff += 2*Math.PI;
+    const w = Math.max(0, Math.min(1, (pose.s - 9)/12));
+    diff = Math.max(-MAX_TILT, Math.min(MAX_TILT, diff)) * w;
+  }
+  const th = REF_THETA + diff + tune.rot*Math.PI/180;
   return {e1x:Math.cos(th-Math.PI/2), e1y:Math.sin(th-Math.PI/2), e2x:Math.cos(th), e2y:Math.sin(th)};
 }
 
@@ -585,7 +605,7 @@ function draw(){
   const {k, ox, oy} = mapper(r);
   const B = basis();
   const S = pose.s * tune.scale * k;
-  const Cx = ox + (pose.x+pose.hx)*k, Cy = oy + (pose.y+pose.hy)*k;
+  const Cx = ox + pose.x*k, Cy = oy + pose.y*k;
   const P = (u,v)=>[Cx + S*((u+tune.u)*B.e1x + (v+tune.v)*B.e2x),
                     Cy + S*((u+tune.u)*B.e1y + (v+tune.v)*B.e2y)];
   const heldFade = pose.locked ? 1 : 0.82;
@@ -666,14 +686,14 @@ function loop(now){
   if(m){
     update(m, now);
   }else if(pose.has){
-    holdDrift();
+    pose.locked = false;
   }
   if(!pose.has){
     setState('Looking for the sticker', null);
   }else if(pose.locked){
-    setState(pose.s < 5 ? 'Locked — move a little closer' : 'Locked on the sticker', 'lock');
+    setState(pose.s < 5 ? 'Locked — move a little closer' : (levelLock ? 'Locked — rotation held level' : 'Locked on the sticker'), 'lock');
   }else{
-    setState(motionEnabled ? 'Holding — following your tilt' : 'Holding last position — realign to relock', 'hold');
+    setState('Holding last position', 'hold');
   }
   draw();
 }
@@ -740,22 +760,121 @@ over.addEventListener('pointerdown', e=>{
 });
 
 const sheet = document.getElementById('sheet'), sheetBody = document.getElementById('sheetBody');
+let lastFocus = null;
+function panels(show){
+  document.getElementById('tune').classList.toggle('on', show==='tune');
+  document.getElementById('ask').classList.toggle('on', show==='ask');
+}
 function openSheet(h){
   const g = GROUPS[h.g];
+  lastFocus = h;
   sheetBody.innerHTML =
     `<div class="tag" style="color:${g.color}">${g.name}</div>
      <h2 id="sheetTitle">${h.lab || h.id}</h2>
-     <p class="sum">${h.sum}</p>` + h.body.map(p=>`<p>${p}</p>`).join('');
-  document.getElementById('tune').classList.remove('on');
+     <p class="sum">${h.sum}</p>` + h.body.map(p=>`<p>${p}</p>`).join('') +
+    `<button class="btn" id="askFrom" style="margin-top:16px">Ask about this control</button>`;
+  panels(null);
   sheet.classList.add('on');
+  document.getElementById('askFrom').onclick = ()=>openAsk(h);
 }
 function openTune(){
   sheetBody.innerHTML = `<div class="tag" style="color:var(--cy)">Alignment</div>
     <h2 id="sheetTitle">Adjust fit</h2>
     <p class="sum">If the rings sit off their knobs, nudge them here. Your settings are remembered on this device.</p>`;
-  document.getElementById('tune').classList.add('on');
+  panels('tune');
   sheet.classList.add('on');
 }
+
+/* ---------- AI handoff ----------
+   Builds a self-contained brief: what the machine is, what the guide
+   already says about the control in focus, and what the tracker can
+   see right now. That packet goes to whichever assistant you prefer —
+   copied out, opened in a chat, or answered in place with your own key. */
+function brief(h){
+  const lines = [];
+  lines.push('You are helping someone standing in front of a DNM 8Z100A 4-zone stereo amplifier, rack mounted, looking at its front panel through a phone camera guide.');
+  lines.push('');
+  lines.push('THE INSTALLATION');
+  lines.push('- Zone 1: Room 1 speakers, normally run at high volume.');
+  lines.push('- Zone 2: Room 2 speakers, normally run low.');
+  lines.push('- Zone 3: corridor speakers, medium.');
+  lines.push('- Zone 4: Room 4, currently no sound.');
+  lines.push('- Levels are two-stage: MUSIC VOL sets the master level, then each zone knob sets how much reaches that room.');
+  lines.push('- Sources: built-in Bluetooth/USB/SD player, FM tuner, plus rear DVD and CD inputs. MODE cycles the internal player; the INPUT buttons choose what the amplifier listens to.');
+  lines.push('- A microphone input has its own MIC VOL, independent of MUSIC VOL.');
+  if(h){
+    lines.push('');
+    lines.push('CONTROL IN FOCUS: ' + (h.lab||h.id));
+    lines.push('- ' + h.sum);
+    (h.body||[]).forEach(p=>lines.push('- ' + p));
+  }
+  lines.push('');
+  lines.push('WHAT THE CAMERA GUIDE SEES');
+  lines.push(pose.has
+    ? (pose.locked ? 'Marker locked, overlay aligned to the panel.' : 'Marker lost, overlay held at its last position.')
+    : 'No marker found yet.');
+  lines.push('');
+  lines.push('Answer practically and in order of what to touch first. Keep it short enough to follow while holding a phone. Do not invent controls that are not listed above.');
+  return lines.join('\n');
+}
+function openAsk(h){
+  lastFocus = h || lastFocus;
+  const who = lastFocus ? (lastFocus.lab||lastFocus.id) : 'the panel';
+  sheetBody.innerHTML = `<div class="tag" style="color:var(--mg)">Handoff</div>
+    <h2 id="sheetTitle">Ask about ${who}</h2>
+    <p class="sum">Your question goes out with the full panel context attached, so the assistant knows the zone layout and what this control does without you explaining it.</p>`;
+  panels('ask');
+  sheet.classList.add('on');
+  syncAsk();
+}
+function fullPrompt(){
+  const q = document.getElementById('askQ').value.trim();
+  return brief(lastFocus) + '\n\nQUESTION\n' + (q || 'Walk me through using this control.');
+}
+function syncAsk(){
+  document.getElementById('askOpen').href =
+    'https://claude.ai/new?q=' + encodeURIComponent(fullPrompt()).slice(0, 6000);
+}
+document.getElementById('askQ').addEventListener('input', syncAsk);
+document.getElementById('askCopy').onclick = async e=>{
+  const btn = e.currentTarget;
+  try{ await navigator.clipboard.writeText(fullPrompt()); btn.textContent='Copied'; }
+  catch(err){ btn.textContent='Copy blocked'; }
+  setTimeout(()=>btn.textContent='Copy brief', 1600);
+};
+let apiKey = '';
+try{ apiKey = localStorage.getItem('panelscope.key') || ''; }catch(e){}
+document.getElementById('askKey').value = apiKey;
+document.getElementById('askKeySave').onclick = ()=>{
+  apiKey = document.getElementById('askKey').value.trim();
+  try{ localStorage.setItem('panelscope.key', apiKey); }catch(e){}
+  document.getElementById('askKeySave').textContent = apiKey ? 'Key saved' : 'Key cleared';
+  setTimeout(()=>document.getElementById('askKeySave').textContent='Save key', 1600);
+};
+document.getElementById('askSend').onclick = async e=>{
+  const out = document.getElementById('askOut'), btn = e.currentTarget;
+  out.hidden = false;
+  if(!apiKey){
+    out.textContent = 'No API key saved on this device. Use Copy brief, or open the chat link below — both carry the same context.';
+    return;
+  }
+  btn.disabled = true; out.textContent = 'Asking…';
+  try{
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method:'POST',
+      headers:{'content-type':'application/json','x-api-key':apiKey,
+        'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+      body: JSON.stringify({model:'claude-sonnet-4-6', max_tokens:700,
+        messages:[{role:'user', content: fullPrompt()}]})
+    });
+    if(!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    out.textContent = (data.content||[]).filter(b=>b.type==='text').map(b=>b.text).join('\n').trim() || 'No answer came back.';
+  }catch(err){
+    out.textContent = 'That request did not go through (' + err.message + '). Check the key, or use Copy brief instead.';
+  }
+  btn.disabled = false;
+};
 sheet.addEventListener('click', e=>{ if(e.target.hasAttribute('data-close')) sheet.classList.remove('on'); });
 document.addEventListener('keydown', e=>{ if(e.key==='Escape') sheet.classList.remove('on'); });
 
@@ -775,22 +894,20 @@ document.getElementById('tuneReset').onclick = ()=>{
   draw();
 };
 
-const motionBtn = document.getElementById('motionBtn');
-if(typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function'){
-  motionBtn.hidden = false;
-  motionBtn.onclick = async ()=>{
-    try{
-      const res = await DeviceOrientationEvent.requestPermission();
-      if(res === 'granted'){ motionBtn.hidden = true; }
-      else{ motionBtn.textContent = 'Tilt blocked'; }
-    }catch(e){ motionBtn.textContent = 'Tilt unavailable'; }
-  };
+const levelBtn = document.getElementById('levelBtn');
+function paintLevel(){
+  levelBtn.setAttribute('aria-pressed', levelLock);
+  levelBtn.style.background = levelLock ? 'var(--ink)' : '';
+  levelBtn.style.color = levelLock ? '#101214' : '';
 }
+levelBtn.onclick = ()=>{ levelLock = !levelLock; saveLevel(); paintLevel(); draw(); };
+paintLevel();
 
 document.getElementById('startCam').onclick = startCamera;
 document.getElementById('startDemo').onclick = startDemo;
 document.getElementById('exit').onclick = closeScan;
 document.getElementById('tuneBtn').onclick = openTune;
+document.getElementById('askBtn').onclick = ()=>openAsk(null);
 document.getElementById('toDemo').onclick = ()=>{
   if(srcMode==='photo'){ startCamera(); } else { if(vid.srcObject){vid.srcObject.getTracks().forEach(t=>t.stop()); vid.srcObject=null;} startDemo(); }
 };
